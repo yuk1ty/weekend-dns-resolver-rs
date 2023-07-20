@@ -1,4 +1,8 @@
 use anyhow::Result;
+use bincode::{
+    config::{BigEndian, WithOtherEndian},
+    DefaultOptions, Options,
+};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
@@ -46,17 +50,27 @@ pub fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>
         kind: record_type as u16,
         class: Class::In as u16,
     };
-    let mut bytes = header_to_bytes(header)?;
-    bytes.extend_from_slice(&question_to_bytes(question)?);
+
+    let config = DefaultOptions::new().with_big_endian();
+
+    let mut bytes = header_to_bytes(header, config)?;
+    bytes.extend_from_slice(&question_to_bytes(question, config)?);
+
     Ok(bytes)
 }
 
-fn header_to_bytes(header: DNSHeader) -> Result<Vec<u8>> {
-    bincode::serialize(&header).map_err(|e| anyhow::anyhow!(e))
+fn header_to_bytes(
+    header: DNSHeader,
+    config: WithOtherEndian<DefaultOptions, BigEndian>,
+) -> Result<Vec<u8>> {
+    config.serialize(&header).map_err(|e| anyhow::anyhow!(e))
 }
 
-fn question_to_bytes(question: DNSQuestion) -> Result<Vec<u8>> {
-    bincode::serialize(&question).map_err(|e| anyhow::anyhow!(e))
+fn question_to_bytes(
+    question: DNSQuestion,
+    config: WithOtherEndian<DefaultOptions, BigEndian>,
+) -> Result<Vec<u8>> {
+    config.serialize(&question).map_err(|e| anyhow::anyhow!(e))
 }
 
 fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
