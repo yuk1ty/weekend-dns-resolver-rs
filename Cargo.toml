@@ -7,6 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.72"
-bincode = "1.3.3"
+deku = "0.16.0"
 rand = "0.8.5"
-serde = { version = "1.0.173", features = ["derive"] }
+zerocopy = "0.6.1"

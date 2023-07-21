@@ -1,9 +1,9 @@
 use anyhow::Result;
-use bincode::Options;
+use deku::prelude::*;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Debug, Default, DekuWrite)]
+#[deku(endian = "big")]
 pub struct DNSHeader {
     pub id: u16,
     pub flags: u16,
@@ -13,7 +13,8 @@ pub struct DNSHeader {
     pub num_additionals: u16,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Default, DekuWrite)]
+#[deku(endian = "big")]
 pub struct DNSQuestion {
     pub name: Vec<u8>,
     pub kind: u16,
@@ -49,27 +50,17 @@ pub fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>
     };
 
     let mut bytes = header_to_bytes(header)?;
-    println!("bytes = {:02x?}", bytes);
     bytes.extend_from_slice(&question_to_bytes(question)?);
-    println!("concat = {:02x?}", bytes);
 
     Ok(bytes)
 }
 
 fn header_to_bytes(header: DNSHeader) -> Result<Vec<u8>> {
-    bincode::options()
-        .with_big_endian()
-        .serialize(&header)
-        .map(|v| v[1..].to_vec())
-        .map_err(|e| anyhow::anyhow!(e))
+    header.to_bytes().map_err(|e| anyhow::anyhow!(e))
 }
 
 fn question_to_bytes(question: DNSQuestion) -> Result<Vec<u8>> {
-    bincode::options()
-        .with_big_endian()
-        .serialize(&question)
-        .map(|v| v[1..].to_vec())
-        .map_err(|e| anyhow::anyhow!(e))
+    question.to_bytes().map_err(|e| anyhow::anyhow!(e))
 }
 
 fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
@@ -86,7 +77,34 @@ fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
 mod tests {
     use std::net::{Ipv4Addr, UdpSocket};
 
-    use crate::{build_query, encode_dns_name, RecordType};
+    use crate::{build_query, encode_dns_name, header_to_bytes, DNSHeader, RecordType};
+    use deku::prelude::*;
+
+    #[test]
+    fn test_header() {
+        let target = DNSHeader {
+            id: 0x1314,
+            flags: 000000000,
+            num_questions: 1,
+            num_answers: 0,
+            num_authorities: 0,
+            num_additionals: 0,
+        };
+        let target = header_to_bytes(target).unwrap();
+
+        let another = DNSHeader {
+            id: 0x1314,
+            flags: 000000000,
+            num_questions: 1,
+            num_answers: 0,
+            num_authorities: 0,
+            num_additionals: 0,
+        };
+        let another = another.to_bytes();
+
+        println!("target  = {:02x?}", target);
+        println!("another = {:02x?}", another);
+    }
 
     #[test]
     fn test_encode_dns_name() {
