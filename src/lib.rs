@@ -1,6 +1,13 @@
+use std::io::{BufRead, Cursor, Read};
+
 use anyhow::Result;
 use deku::prelude::*;
 use rand::Rng;
+
+pub mod consts {
+    pub const DNS_BUF_SIZE: usize = 1024;
+    pub const HEADER_SIZE: usize = 12;
+}
 
 #[derive(Debug, Default, DekuWrite)]
 #[deku(endian = "big")]
@@ -11,6 +18,28 @@ pub struct DNSHeader {
     pub num_answers: u16,
     pub num_authorities: u16,
     pub num_additionals: u16,
+}
+
+impl TryFrom<&[u8]> for DNSHeader {
+    type Error = anyhow::Error;
+
+    fn try_from(buf: &[u8]) -> Result<Self> {
+        Ok(DNSHeader {
+            id: u16::from_be_bytes(buf[0..2].try_into()?),
+            flags: u16::from_be_bytes(buf[2..4].try_into()?),
+            num_questions: u16::from_be_bytes(buf[4..6].try_into()?),
+            num_answers: u16::from_be_bytes(buf[6..8].try_into()?),
+            num_authorities: u16::from_be_bytes(buf[8..10].try_into()?),
+            num_additionals: u16::from_be_bytes(buf[10..12].try_into()?),
+        })
+    }
+}
+
+pub fn parse_header(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Result<DNSHeader> {
+    let header = &mut [0; consts::HEADER_SIZE];
+    reader.read_exact(header)?;
+    let header: &[u8] = header;
+    DNSHeader::try_from(header)
 }
 
 #[derive(Debug, Default, DekuWrite)]
@@ -75,9 +104,14 @@ fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, UdpSocket};
+    use std::{
+        io::Cursor,
+        net::{Ipv4Addr, UdpSocket},
+    };
 
-    use crate::{build_query, encode_dns_name, header_to_bytes, DNSHeader, RecordType};
+    use crate::{
+        build_query, consts, encode_dns_name, header_to_bytes, parse_header, DNSHeader, RecordType,
+    };
     use deku::prelude::*;
 
     #[test]
@@ -130,10 +164,14 @@ mod tests {
         // Read the response. UDP DNS responses are usually less than 512 bytes
         // (see https://www.netmeister.org/blog/dns-size.html for MUCH more on that)
         // so reading 1024 bytes is enough
-        let mut response = [0; 1024];
+        let mut response = [0; consts::DNS_BUF_SIZE];
         let (_, _) = socket.recv_from(&mut response).unwrap();
 
         // Process the response as needed
-        println!("Response: {:?}", &response);
+        println!("Response: {:x?}", &response);
+
+        let mut cur = Cursor::new(&response);
+        println!("{:?}", parse_header(&mut cur));
+        println!("{:?}", cur.position());
     }
 }
