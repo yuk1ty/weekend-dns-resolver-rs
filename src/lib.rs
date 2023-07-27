@@ -1,4 +1,4 @@
-use std::io::{BufRead, Cursor, Read};
+use std::io::{Cursor, Read};
 
 use anyhow::Result;
 use deku::prelude::*;
@@ -36,7 +36,7 @@ impl TryFrom<&[u8]> for DNSHeader {
     }
 }
 
-pub fn parse_header(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Result<DNSHeader> {
+pub fn parse_header<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSHeader> {
     let header = &mut [0; consts::HEADER_SIZE];
     reader.read_exact(header)?;
     let header: &[u8] = header;
@@ -63,7 +63,7 @@ impl TryFrom<(Vec<u8>, &[u8])> for DNSQuestion {
     }
 }
 
-pub fn parse_question(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Result<DNSQuestion> {
+pub fn parse_question<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSQuestion> {
     let name = decode_name(reader)?;
     let data = &mut [0; consts::QUESTION_DATA_SIZE];
     reader.read_exact(data)?;
@@ -71,7 +71,7 @@ pub fn parse_question(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Resul
     DNSQuestion::try_from((name.into(), data))
 }
 
-fn decode_name(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Result<String> {
+fn decode_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<String> {
     let mut cursor = reader.position();
     let mut parts = Vec::new();
     let mut length = reader.get_ref()[cursor as usize];
@@ -95,7 +95,7 @@ fn decode_name(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> Result<Strin
     Ok(parts.join("."))
 }
 
-fn decode_compressed_name(reader: &mut Cursor<&[u8; consts::DNS_BUF_SIZE]>) -> String {
+fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> String {
     todo!()
 }
 
