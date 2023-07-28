@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.72"
 deku = "0.16.0"
+num_enum = "0.6.1"
 rand = "0.8.5"
 zerocopy = "0.6.1"

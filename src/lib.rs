@@ -2,6 +2,7 @@ use std::io::{Cursor, Read};
 
 use anyhow::Result;
 use deku::prelude::*;
+use num_enum::TryFromPrimitive;
 use rand::Rng;
 
 pub mod consts {
@@ -99,11 +100,13 @@ fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -
     todo!()
 }
 
+#[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
 pub enum RecordType {
     A = 1,
 }
 
+#[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
 pub enum Class {
     In = 1,
@@ -119,6 +122,7 @@ pub fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>
     let header = DNSHeader {
         id,
         flags: recursion_desired,
+        num_questions: 1,
         ..Default::default()
     };
     let question = DNSQuestion {
@@ -151,6 +155,34 @@ fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[derive(Debug)]
+pub struct DNSRecord {
+    name: Vec<u8>,
+    kind: RecordType,
+    class: Class,
+    ttl: u32,
+    data: Vec<u8>,
+}
+
+fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
+    let name = decode_name(reader)?;
+    let data = &mut [0; 10];
+    reader.read_exact(data)?;
+    let kind = u16::from_be_bytes(data[0..2].try_into()?);
+    let class = u16::from_be_bytes(data[2..4].try_into()?);
+    let ttl = u32::from_be_bytes(data[4..8].try_into()?);
+    let data_len = u16::from_be_bytes(data[8..10].try_into()?);
+    let mut data = vec![0; data_len as usize];
+    reader.read_exact(&mut data)?;
+    Ok(DNSRecord {
+        name: name.into(),
+        kind: RecordType::try_from(kind)?,
+        class: Class::try_from(class)?,
+        ttl,
+        data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -160,7 +192,7 @@ mod tests {
 
     use crate::{
         build_query, consts, encode_dns_name, header_to_bytes, parse_header, parse_question,
-        DNSHeader, RecordType,
+        parse_record, DNSHeader, RecordType,
     };
     use deku::prelude::*;
 
@@ -225,6 +257,8 @@ mod tests {
         println!("header pos = {:?}", cur.position());
         println!("{:?}", parse_question(&mut cur));
         println!("question pos = {:?}", cur.position());
+        println!("{:?}", parse_record(&mut cur));
+        println!("record pos = {:?}", cur.position());
     }
 
     #[test]
