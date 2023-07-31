@@ -1,4 +1,7 @@
-use std::io::{Cursor, Read};
+use std::{
+    io::{Cursor, Read},
+    net::{Ipv4Addr, UdpSocket},
+};
 
 use anyhow::Result;
 use deku::prelude::*;
@@ -9,6 +12,21 @@ pub mod consts {
     pub const DNS_BUF_SIZE: usize = 1024;
     pub const HEADER_SIZE: usize = 12;
     pub const QUESTION_DATA_SIZE: usize = 4;
+}
+
+pub fn lookup_domain(domain_name: &str) -> Result<Ipv4Addr> {
+    let query = build_query(domain_name, RecordType::A)?;
+
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    socket.send_to(&query, ("8.8.8.8", 53)).unwrap();
+
+    let mut response = [0; consts::DNS_BUF_SIZE];
+    let (_, _) = socket.recv_from(&mut response).unwrap();
+
+    let packet = parse_dns_packet(&response)?;
+    let [octet1, octet2, octet3, octet4, ..] = packet.answers[0].data[0..4] else { return Err(anyhow::anyhow!("data is not correct format!")); };
+
+    Ok(Ipv4Addr::new(octet1, octet2, octet3, octet4))
 }
 
 #[derive(Debug, Default, DekuWrite)]
@@ -37,7 +55,7 @@ impl TryFrom<&[u8]> for DNSHeader {
     }
 }
 
-pub fn parse_header<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSHeader> {
+fn parse_header<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSHeader> {
     let header = &mut [0; consts::HEADER_SIZE];
     reader.read_exact(header)?;
     let header: &[u8] = header;
@@ -64,7 +82,7 @@ impl TryFrom<(Vec<u8>, &[u8])> for DNSQuestion {
     }
 }
 
-pub fn parse_question<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSQuestion> {
+fn parse_question<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSQuestion> {
     let name = decode_name(reader)?;
     let data = &mut [0; consts::QUESTION_DATA_SIZE];
     reader.read_exact(data)?;
@@ -117,7 +135,7 @@ pub enum Class {
     In = 1,
 }
 
-pub fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>> {
+fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>> {
     let name = encode_dns_name(domain_name)?;
     let id = {
         let mut rng = rand::thread_rng();
@@ -169,7 +187,7 @@ pub struct DNSRecord {
     data: Vec<u8>,
 }
 
-pub fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
+fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
     let name = decode_name(reader)?;
     let data = &mut [0; 10];
     reader.read_exact(data)?;
@@ -197,7 +215,7 @@ pub struct DNSPacket {
     pub additionals: Vec<DNSRecord>,
 }
 
-pub fn parse_dns_packet<const SIZE: usize>(data: &[u8; SIZE]) -> Result<DNSPacket> {
+fn parse_dns_packet<const SIZE: usize>(data: &[u8; SIZE]) -> Result<DNSPacket> {
     let mut reader = Cursor::new(data);
     let header = parse_header(&mut reader)?;
     let questions = (0..header.num_questions)
