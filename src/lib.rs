@@ -169,7 +169,7 @@ pub struct DNSRecord {
     data: Vec<u8>,
 }
 
-fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
+pub fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
     let name = decode_name(reader)?;
     let data = &mut [0; 10];
     reader.read_exact(data)?;
@@ -188,6 +188,39 @@ fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<D
     })
 }
 
+#[derive(Debug)]
+pub struct DNSPacket {
+    pub header: DNSHeader,
+    pub questions: Vec<DNSQuestion>,
+    pub answers: Vec<DNSRecord>,
+    pub authorities: Vec<DNSRecord>,
+    pub additionals: Vec<DNSRecord>,
+}
+
+pub fn parse_dns_packet<const SIZE: usize>(data: &[u8; SIZE]) -> Result<DNSPacket> {
+    let mut reader = Cursor::new(data);
+    let header = parse_header(&mut reader)?;
+    let questions = (0..header.num_questions)
+        .map(|_| parse_question(&mut reader))
+        .collect::<Result<Vec<_>>>()?;
+    let answers = (0..header.num_answers)
+        .map(|_| parse_record(&mut reader))
+        .collect::<Result<Vec<_>>>()?;
+    let authorities = (0..header.num_authorities)
+        .map(|_| parse_record(&mut reader))
+        .collect::<Result<Vec<_>>>()?;
+    let additionals = (0..header.num_additionals)
+        .map(|_| parse_record(&mut reader))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(DNSPacket {
+        header,
+        questions,
+        answers,
+        authorities,
+        additionals,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -196,8 +229,8 @@ mod tests {
     };
 
     use crate::{
-        build_query, consts, encode_dns_name, header_to_bytes, parse_header, parse_question,
-        parse_record, DNSHeader, RecordType,
+        build_query, consts, encode_dns_name, header_to_bytes, parse_dns_packet, parse_header,
+        parse_question, parse_record, DNSHeader, RecordType,
     };
     use deku::prelude::*;
 
@@ -257,13 +290,15 @@ mod tests {
         // Process the response as needed
         println!("Response: {:x?}", &response);
 
-        let mut cur = Cursor::new(&response);
-        println!("{:?}", parse_header(&mut cur));
-        println!("header pos = {:?}", cur.position());
-        println!("{:?}", parse_question(&mut cur));
-        println!("question pos = {:?}", cur.position());
-        println!("{:?}", parse_record(&mut cur));
-        println!("record pos = {:?}", cur.position());
+        let r = parse_dns_packet(&response);
+        println!("{:?}", r);
+
+        let data = &r.unwrap().answers[0].data;
+        assert_eq!(data.len(), 4);
+        assert_eq!(data[0], 93);
+        assert_eq!(data[1], 184);
+        assert_eq!(data[2], 216);
+        assert_eq!(data[3], 34);
     }
 
     #[test]
