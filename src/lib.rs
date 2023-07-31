@@ -3,15 +3,24 @@ use std::{
     net::{Ipv4Addr, UdpSocket},
 };
 
-use anyhow::Result;
-use deku::prelude::*;
+use anyhow::{Ok, Result};
 use num_enum::TryFromPrimitive;
 use rand::Rng;
 
-pub mod consts {
+mod macros {
+    #[macro_export]
+    macro_rules! extract_bytes {
+        ($buf:expr, $range:expr, $ty:tt) => {
+            <$ty>::from_be_bytes($buf[$range].try_into()?)
+        };
+    }
+}
+
+mod consts {
     pub const DNS_BUF_SIZE: usize = 1024;
     pub const HEADER_SIZE: usize = 12;
     pub const QUESTION_DATA_SIZE: usize = 4;
+    pub const RECORD_DATA_SIZE: usize = 10;
 }
 
 pub fn lookup_domain(domain_name: &str) -> Result<Ipv4Addr> {
@@ -29,9 +38,12 @@ pub fn lookup_domain(domain_name: &str) -> Result<Ipv4Addr> {
     Ok(Ipv4Addr::new(octet1, octet2, octet3, octet4))
 }
 
-#[derive(Debug, Default, DekuWrite)]
-#[deku(endian = "big")]
-pub struct DNSHeader {
+trait ToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+#[derive(Debug, Default)]
+struct DNSHeader {
     pub id: u16,
     pub flags: u16,
     pub num_questions: u16,
@@ -40,17 +52,31 @@ pub struct DNSHeader {
     pub num_additionals: u16,
 }
 
+impl ToBytes for DNSHeader {
+    fn to_bytes(&self) -> Vec<u8> {
+        [
+            self.id.to_be_bytes(),
+            self.flags.to_be_bytes(),
+            self.num_questions.to_be_bytes(),
+            self.num_answers.to_be_bytes(),
+            self.num_authorities.to_be_bytes(),
+            self.num_additionals.to_be_bytes(),
+        ]
+        .concat()
+    }
+}
+
 impl TryFrom<&[u8]> for DNSHeader {
     type Error = anyhow::Error;
 
     fn try_from(buf: &[u8]) -> Result<Self> {
         Ok(DNSHeader {
-            id: u16::from_be_bytes(buf[0..2].try_into()?),
-            flags: u16::from_be_bytes(buf[2..4].try_into()?),
-            num_questions: u16::from_be_bytes(buf[4..6].try_into()?),
-            num_answers: u16::from_be_bytes(buf[6..8].try_into()?),
-            num_authorities: u16::from_be_bytes(buf[8..10].try_into()?),
-            num_additionals: u16::from_be_bytes(buf[10..12].try_into()?),
+            id: extract_bytes!(buf, 0..2, u16),
+            flags: extract_bytes!(buf, 2..4, u16),
+            num_questions: extract_bytes!(buf, 4..6, u16),
+            num_answers: extract_bytes!(buf, 6..8, u16),
+            num_authorities: extract_bytes!(buf, 8..10, u16),
+            num_additionals: extract_bytes!(buf, 10..12, u16),
         })
     }
 }
@@ -62,12 +88,22 @@ fn parse_header<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<D
     DNSHeader::try_from(header)
 }
 
-#[derive(Debug, Default, DekuWrite)]
-#[deku(endian = "big")]
-pub struct DNSQuestion {
+#[derive(Debug, Default)]
+struct DNSQuestion {
     pub name: Vec<u8>,
-    pub kind: u16,
-    pub class: u16,
+    pub kind: RecordType,
+    pub class: Class,
+}
+
+impl ToBytes for DNSQuestion {
+    fn to_bytes(&self) -> Vec<u8> {
+        [
+            self.name.clone(),
+            (self.kind.clone() as u16).to_be_bytes().to_vec(),
+            (self.class.clone() as u16).to_be_bytes().to_vec(),
+        ]
+        .concat()
+    }
 }
 
 impl TryFrom<(Vec<u8>, &[u8])> for DNSQuestion {
@@ -76,8 +112,8 @@ impl TryFrom<(Vec<u8>, &[u8])> for DNSQuestion {
     fn try_from((name, data): (Vec<u8>, &[u8])) -> std::result::Result<Self, Self::Error> {
         Ok(DNSQuestion {
             name,
-            kind: u16::from_be_bytes(data[0..2].try_into()?),
-            class: u16::from_be_bytes(data[2..4].try_into()?),
+            kind: RecordType::try_from(extract_bytes!(data, 0..2, u16))?,
+            class: Class::try_from(extract_bytes!(data, 2..4, u16))?,
         })
     }
 }
@@ -123,15 +159,17 @@ fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -
     decode_name(reader)
 }
 
-#[derive(Debug, TryFromPrimitive)]
+#[derive(Clone, Debug, Default, TryFromPrimitive)]
 #[repr(u16)]
 pub enum RecordType {
+    #[default]
     A = 1,
 }
 
-#[derive(Debug, TryFromPrimitive)]
+#[derive(Clone, Default, Debug, TryFromPrimitive)]
 #[repr(u16)]
 pub enum Class {
+    #[default]
     In = 1,
 }
 
@@ -150,22 +188,22 @@ fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>> {
     };
     let question = DNSQuestion {
         name,
-        kind: record_type as u16,
-        class: Class::In as u16,
+        kind: record_type,
+        class: Class::In,
     };
 
-    let mut bytes = header_to_bytes(header)?;
-    bytes.extend_from_slice(&question_to_bytes(question)?);
+    let mut bytes = header_to_bytes(header);
+    bytes.extend_from_slice(&question_to_bytes(question));
 
     Ok(bytes)
 }
 
-fn header_to_bytes(header: DNSHeader) -> Result<Vec<u8>> {
-    header.to_bytes().map_err(|e| anyhow::anyhow!(e))
+fn header_to_bytes(header: DNSHeader) -> Vec<u8> {
+    header.to_bytes()
 }
 
-fn question_to_bytes(question: DNSQuestion) -> Result<Vec<u8>> {
-    question.to_bytes().map_err(|e| anyhow::anyhow!(e))
+fn question_to_bytes(question: DNSQuestion) -> Vec<u8> {
+    question.to_bytes()
 }
 
 fn encode_dns_name(name: &str) -> Result<Vec<u8>> {
@@ -187,27 +225,40 @@ pub struct DNSRecord {
     data: Vec<u8>,
 }
 
+impl<const SIZE: usize> TryFrom<(Vec<u8>, &mut Cursor<&[u8; SIZE]>)> for DNSRecord {
+    type Error = anyhow::Error;
+
+    fn try_from(
+        (name, reader): (Vec<u8>, &mut Cursor<&[u8; SIZE]>),
+    ) -> std::result::Result<Self, Self::Error> {
+        let data = &mut [0; consts::RECORD_DATA_SIZE];
+        reader.read_exact(data)?;
+
+        let kind = extract_bytes!(data, 0..2, u16);
+        let class = extract_bytes!(data, 2..4, u16);
+        let ttl = extract_bytes!(data, 4..8, u32);
+        let data_len = extract_bytes!(data, 8..10, u16);
+
+        let mut data = vec![0; data_len as usize];
+        reader.read_exact(&mut data)?;
+
+        Ok(DNSRecord {
+            name,
+            kind: RecordType::try_from(kind)?,
+            class: Class::try_from(class)?,
+            ttl,
+            data,
+        })
+    }
+}
+
 fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
     let name = decode_name(reader)?;
-    let data = &mut [0; 10];
-    reader.read_exact(data)?;
-    let kind = u16::from_be_bytes(data[0..2].try_into()?);
-    let class = u16::from_be_bytes(data[2..4].try_into()?);
-    let ttl = u32::from_be_bytes(data[4..8].try_into()?);
-    let data_len = u16::from_be_bytes(data[8..10].try_into()?);
-    let mut data = vec![0; data_len as usize];
-    reader.read_exact(&mut data)?;
-    Ok(DNSRecord {
-        name: name.into(),
-        kind: RecordType::try_from(kind)?,
-        class: Class::try_from(class)?,
-        ttl,
-        data,
-    })
+    DNSRecord::try_from((name.into(), reader))
 }
 
 #[derive(Debug)]
-pub struct DNSPacket {
+struct DNSPacket {
     pub header: DNSHeader,
     pub questions: Vec<DNSQuestion>,
     pub answers: Vec<DNSRecord>,
@@ -247,10 +298,9 @@ mod tests {
     };
 
     use crate::{
-        build_query, consts, encode_dns_name, header_to_bytes, parse_dns_packet, parse_header,
-        parse_question, parse_record, DNSHeader, RecordType,
+        build_query, consts, encode_dns_name, header_to_bytes, parse_dns_packet, DNSHeader,
+        RecordType, ToBytes,
     };
-    use deku::prelude::*;
 
     #[test]
     fn test_header() {
@@ -262,7 +312,7 @@ mod tests {
             num_authorities: 0,
             num_additionals: 0,
         };
-        let target = header_to_bytes(target).unwrap();
+        let target = header_to_bytes(target);
 
         let another = DNSHeader {
             id: 0x1314,
