@@ -78,8 +78,8 @@ fn decode_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<St
     let mut length = reader.get_ref()[cursor as usize];
 
     while length != 0 {
-        if (length & 0b11000000) != 0 {
-            parts.push(decode_compressed_name(reader));
+        if (length & 0b1100_0000) != 0 {
+            parts.push(decode_compressed_name(reader)?);
             cursor += 2;
             reader.set_position(cursor);
             return Ok(parts.join("."));
@@ -96,8 +96,13 @@ fn decode_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<St
     Ok(parts.join("."))
 }
 
-fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> String {
-    todo!()
+fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<String> {
+    let curr_pos = reader.position() as usize;
+    let curr = reader.get_ref()[curr_pos] & 0b0011_1111;
+    let next = reader.get_ref()[curr_pos + 1];
+    let cursor = u16::from_be_bytes([curr, next]);
+    reader.set_position(cursor as u64);
+    decode_name(reader)
 }
 
 #[derive(Debug, TryFromPrimitive)]
