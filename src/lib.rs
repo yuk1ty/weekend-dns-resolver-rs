@@ -33,9 +33,13 @@ pub fn lookup_domain(domain_name: &str) -> Result<Ipv4Addr> {
     let (_, _) = socket.recv_from(&mut response).unwrap();
 
     let packet = parse_dns_packet(&response)?;
-    let [octet1, octet2, octet3, octet4, ..] = packet.answers[0].data[0..4] else { return Err(anyhow::anyhow!("data is not correct format!")); };
 
-    Ok(Ipv4Addr::new(octet1, octet2, octet3, octet4))
+    Ok(ip_to_string(&packet.answers[0].data[0..4]))
+}
+
+fn ip_to_string(data: &[u8]) -> Ipv4Addr {
+    let (octet1, octet2, octet3, octet4) = (data[0], data[1], data[2], data[3]);
+    Ipv4Addr::new(octet1, octet2, octet3, octet4)
 }
 
 trait ToBytes {
@@ -43,7 +47,7 @@ trait ToBytes {
 }
 
 #[derive(Debug, Default)]
-struct DNSHeader {
+pub struct DNSHeader {
     pub id: u16,
     pub flags: u16,
     pub num_questions: u16,
@@ -89,7 +93,7 @@ fn parse_header<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<D
 }
 
 #[derive(Debug, Default)]
-struct DNSQuestion {
+pub struct DNSQuestion {
     pub name: Vec<u8>,
     pub kind: RecordType,
     pub class: Class,
@@ -164,6 +168,10 @@ fn decode_compressed_name<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -
 pub enum RecordType {
     #[default]
     A = 1,
+    NS = 2,
+    CNAME = 5,
+    TXT = 16,
+    AAAA = 28,
 }
 
 #[derive(Clone, Default, Debug, TryFromPrimitive)]
@@ -173,16 +181,30 @@ pub enum Class {
     In = 1,
 }
 
+pub fn send_query(
+    ip_address: Ipv4Addr,
+    domain_name: &str,
+    record_type: RecordType,
+) -> Result<DNSPacket> {
+    let query = build_query(domain_name, record_type)?;
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    socket.send_to(&query, (ip_address, 53)).unwrap();
+
+    let mut response = [0; consts::DNS_BUF_SIZE];
+    let (_, _) = socket.recv_from(&mut response).unwrap();
+
+    parse_dns_packet(&response)
+}
+
 fn build_query(domain_name: &str, record_type: RecordType) -> Result<Vec<u8>> {
     let name = encode_dns_name(domain_name)?;
     let id = {
         let mut rng = rand::thread_rng();
         rng.gen_range(0..=65535)
     };
-    let recursion_desired = 1 << 8;
     let header = DNSHeader {
         id,
-        flags: recursion_desired,
+        flags: 0,
         num_questions: 1,
         ..Default::default()
     };
@@ -225,40 +247,51 @@ pub struct DNSRecord {
     data: Vec<u8>,
 }
 
-impl<const SIZE: usize> TryFrom<(Vec<u8>, &mut Cursor<&[u8; SIZE]>)> for DNSRecord {
+impl<const SIZE: usize> TryFrom<&mut Cursor<&[u8; SIZE]>> for DNSRecord {
     type Error = anyhow::Error;
 
-    fn try_from(
-        (name, reader): (Vec<u8>, &mut Cursor<&[u8; SIZE]>),
-    ) -> std::result::Result<Self, Self::Error> {
+    fn try_from(reader: &mut Cursor<&[u8; SIZE]>) -> std::result::Result<Self, Self::Error> {
+        let name = decode_name(reader)?.as_bytes().to_vec();
         let data = &mut [0; consts::RECORD_DATA_SIZE];
         reader.read_exact(data)?;
 
-        let kind = extract_bytes!(data, 0..2, u16);
+        let kind = dbg!(extract_bytes!(data, 0..2, u16));
         let class = extract_bytes!(data, 2..4, u16);
         let ttl = extract_bytes!(data, 4..8, u32);
-        let data_len = extract_bytes!(data, 8..10, u16);
 
-        let mut data = vec![0; data_len as usize];
-        reader.read_exact(&mut data)?;
+        let data = match RecordType::try_from(kind)? {
+            // TODO buggy
+            RecordType::NS | RecordType::CNAME => decode_name(reader)?,
+            RecordType::A => {
+                let data_len = extract_bytes!(data, 8..10, u16);
+                let mut data = vec![0; data_len as usize];
+                reader.read_exact(&mut data)?;
+                ip_to_string(&data).to_string()
+            }
+            _ => {
+                let data_len = extract_bytes!(data, 8..10, u16);
+                let mut data = vec![0; data_len as usize];
+                reader.read_exact(&mut data)?;
+                String::from_utf8(data)?
+            }
+        };
 
         Ok(DNSRecord {
             name,
             kind: RecordType::try_from(kind)?,
             class: Class::try_from(class)?,
             ttl,
-            data,
+            data: data.as_bytes().to_vec(),
         })
     }
 }
 
 fn parse_record<const SIZE: usize>(reader: &mut Cursor<&[u8; SIZE]>) -> Result<DNSRecord> {
-    let name = decode_name(reader)?;
-    DNSRecord::try_from((name.into(), reader))
+    DNSRecord::try_from(reader)
 }
 
 #[derive(Debug)]
-struct DNSPacket {
+pub struct DNSPacket {
     pub header: DNSHeader,
     pub questions: Vec<DNSQuestion>,
     pub answers: Vec<DNSRecord>,
@@ -298,8 +331,8 @@ mod tests {
     };
 
     use crate::{
-        build_query, consts, encode_dns_name, header_to_bytes, parse_dns_packet, DNSHeader,
-        RecordType, ToBytes,
+        build_query, consts, encode_dns_name, header_to_bytes, parse_dns_packet, send_query,
+        DNSHeader, RecordType, ToBytes,
     };
 
     #[test]
@@ -342,27 +375,30 @@ mod tests {
 
     #[test]
     fn send_udp_request_to_google_dns_server_and_get_the_response() {
-        let query = build_query("www.example.com", RecordType::A).unwrap();
+        // let query = build_query("www.example.com", RecordType::A).unwrap();
+        //
+        // let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        //
+        // // Send our query to 8.8.8.8, port 53. Port 53 is the DNS port.
+        // socket.send_to(&query, ("8.8.8.8", 53)).unwrap();
+        //
+        // // Read the response. UDP DNS responses are usually less than 512 bytes
+        // // (see https://www.netmeister.org/blog/dns-size.html for MUCH more on that)
+        // // so reading 1024 bytes is enough
+        // let mut response = [0; consts::DNS_BUF_SIZE];
+        // let (_, _) = socket.recv_from(&mut response).unwrap();
+        //
+        // // Process the response as needed
+        // println!("Response: {:x?}", &response);
+        //
+        // let r = parse_dns_packet(&response);
+        // println!("{:?}", r);
+        //
+        // let data = &r.unwrap().answers[0].data;
+        let query = send_query("8.8.8.8".parse().unwrap(), "example.com", RecordType::A).unwrap();
+        let data = &query.answers[0].data;
 
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
-
-        // Send our query to 8.8.8.8, port 53. Port 53 is the DNS port.
-        socket.send_to(&query, ("8.8.8.8", 53)).unwrap();
-
-        // Read the response. UDP DNS responses are usually less than 512 bytes
-        // (see https://www.netmeister.org/blog/dns-size.html for MUCH more on that)
-        // so reading 1024 bytes is enough
-        let mut response = [0; consts::DNS_BUF_SIZE];
-        let (_, _) = socket.recv_from(&mut response).unwrap();
-
-        // Process the response as needed
-        println!("Response: {:x?}", &response);
-
-        let r = parse_dns_packet(&response);
-        println!("{:?}", r);
-
-        let data = &r.unwrap().answers[0].data;
-        assert_eq!(data.len(), 4);
+        assert_eq!(data.len(), 13);
         assert_eq!(data[0], 93);
         assert_eq!(data[1], 184);
         assert_eq!(data[2], 216);
